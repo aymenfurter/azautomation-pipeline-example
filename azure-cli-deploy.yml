@@ -1,0 +1,72 @@
+parameters:
+  environment: ''
+
+steps:
+- checkout: self
+- task: AzureCLI@2
+  displayName: 'Install Azure Automation Extension'
+  inputs:
+    azureSubscription: 'arm-service-connection'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      if ! az extension show --name automation -o none > /dev/null 2>&1; then
+        az config set extension.use_dynamic_install=yes_without_prompt
+        az extension add --name automation
+      else
+        echo "Azure Automation extension already installed."
+      fi
+      
+- task: AzureCLI@2
+  displayName: 'Create Resource Group'
+  inputs:
+    azureSubscription: 'arm-service-connection'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      if ! az group show --name "azautomation-rg" --query id -o tsv > /dev/null 2>&1; then
+        az group create --name "azautomation-rg" --location "switzerlandnorth"
+      else
+        echo "Resource group 'azautomation-rg' already exists."
+      fi
+
+- task: AzureCLI@2
+  displayName: 'Create Automation Account'
+  inputs:
+    azureSubscription: 'arm-service-connection'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      az automation account create \
+        --name "AutomationAccount-${{ parameters.environment }}" \
+        --resource-group "azautomation-rg" \
+        --location "switzerlandnorth"
+        
+- task: AzureCLI@2
+  displayName: 'Upload PowerShell Script to Automation Account'
+  inputs:
+    azureSubscription: 'arm-service-connection'
+    scriptType: 'pscore'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      $AutomationAccountName = "AutomationAccount-${{ parameters.environment }}"
+      $ResourceGroupName = "azautomation-rg"
+      $ScriptName = "powershellScript.ps1"
+      $ScriptContent = Get-Content -Path "powershellScript.ps1" -Raw
+
+      $AutomationAccount = az automation account show --name $AutomationAccountName --resource-group $ResourceGroupName | ConvertFrom-Json
+      $ConnectionFields = @{
+        "ApplicationId"     = $AutomationAccount.properties.applicationId
+        "TenantId"          = $AutomationAccount.properties.tenantId
+        "SubscriptionId"    = $AutomationAccount.properties.subscriptionId
+      }
+
+      $RunbookExists = az automation runbook show --name $ScriptName --resource-group $ResourceGroupName --automation-account-name $AutomationAccountName -o json 2>$null
+
+      if (-not [string]::IsNullOrEmpty($RunbookExists)) {
+          az automation runbook update --name $ScriptName --resource-group $ResourceGroupName --automation-account-name $AutomationAccountName
+          az automation runbook replace-content --name $ScriptName --resource-group $ResourceGroupName --automation-account-name $AutomationAccountName --content "$ScriptContent"
+      } else {
+          az automation runbook create --name $ScriptName --resource-group $ResourceGroupName --automation-account-name $AutomationAccountName --type 'PowerShell'
+          az automation runbook replace-content --name $ScriptName --resource-group $ResourceGroupName --automation-account-name $AutomationAccountName --content "$ScriptContent"
+      }
